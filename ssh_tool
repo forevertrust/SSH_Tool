@@ -1,0 +1,275 @@
+import re
+import time
+import hashlib
+import tkinter.filedialog
+from tkinter.simpledialog import *
+
+import paramiko
+
+
+class Lead:
+    def __init__(self):
+        _root = Tk()
+        _root.resizable(False, False)
+        _root.geometry("400x150+300+300")
+        self.master = _root
+        self.target_ip = None
+        self.port = 22
+        self.login = None
+        self.password = None
+        self.__layout()
+        self.run()
+
+    def run(self):
+        self.master.mainloop()
+
+    def __layout(self):
+        self.ip_label = Label(self.master, text="Target IP", width=15)
+        self.ip_label.grid(row=0, column=0)
+        self.ip_entry = Entry(self.master, width=40)
+        self.ip_entry.grid(row=0, column=1, columnspan=3)
+
+        self.port_label = Label(self.master, text="Target Port", width=15)
+        self.port_label.grid(row=1, column=0)
+        self.port_entry = Entry(self.master, width=40)
+        self.port_entry.grid(row=1, column=1, columnspan=3)
+
+        self.login_label = Label(self.master, text="Login Name", width=15)
+        self.login_label.grid(row=2, column=0)
+        self.login_entry = Entry(self.master, width=40)
+        self.login_entry.grid(row=2, column=1, columnspan=3)
+
+        self.pw_label = Label(self.master, text="Password(Or Mac)", width=15)
+        self.pw_label.grid(row=3, column=0)
+        self.pw_entry = Entry(self.master, width=40)
+        self.pw_entry.grid(row=3, column=1, columnspan=3)
+
+        self.port_entry.insert("end", "22")
+        self.pw_calc_btn = Button(self.master, text="Password Calc", command=self.__password_calc)
+        self.pw_calc_btn.grid(row=4, column=0)
+
+        self.enter_btn = Button(self.master, text="Connect", command=self.__connect)
+        self.enter_btn.grid(row=4, column=2)
+        self.master.bind("<Return>", self.__connect)
+        self.ip_entry.focus_set()
+        pass
+
+    def __password_calc(self):
+        mac_candidate = self.pw_entry.get()
+        mac_pattern = re.compile(r'((([a-f0-9]{2}:){5})|(([a-f0-9]{2}-){5}))[a-f0-9]{2}')
+        self.pw_entry.delete(0, END)
+        if re.findall(mac_pattern, mac_candidate):
+            self.pw_entry.insert("end", Lead.get_ssh_password(mac_candidate))
+        else:
+            self.pw_entry.insert("end", "Invalid Mac Address")
+        pass
+
+    def __shutdown(self):
+        self.master.destroy()
+
+    def __connect(self, event=None):
+        self.target_ip = self.ip_entry.get()
+        self.port = self.port_entry.get()
+        self.login = self.login_entry.get()
+        self.password = self.pw_entry.get()
+        self.__shutdown()
+
+    @staticmethod
+    def string_to_md5(string):
+        md5_val = hashlib.md5(string.encode('utf8')).hexdigest()
+        return md5_val
+
+    @staticmethod
+    def get_ssh_password(mac: str):
+        return Lead.string_to_md5(mac.replace('-', '').upper())[:16]
+
+    def interface(self):
+        return self.target_ip, self.port, self.login, self.password
+
+
+class SSHClientConnect:
+    def __init__(self, _host_name, _host_port, _username, _password, _port_protection=None):
+        self.username = _username
+        self.password = _password
+        self.ssh = paramiko.SSHClient()
+        self.ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        self.ssh.connect(hostname=_host_name, port=_host_port, username=_username,
+                         password=_password, allow_agent=False, look_for_keys=False)
+        self.shell_interact_channel = self.ssh.invoke_shell()
+        self.command_stack = list()
+        self.command_history = set()
+        self.command_search_state = False
+        self.max_len = 28
+        if _port_protection:
+            self.execute_command(['goash', _port_protection])
+
+    def __del__(self):
+        self.ssh.close()
+        if self.shell_interact_channel:
+            self.shell_interact_channel.shutdown(2)
+            self.shell_interact_channel = None
+
+    def release(self):
+        self.__del__()
+
+    def execute_command(self, _input):
+        resp = None
+        command = _input.strip()
+        self.shell_interact_channel.send(command + '\n')
+        time.sleep(0.3)
+        resp = self.shell_interact_channel.recv(9999).decode('utf-8')
+        print(resp)
+        self.update(command)
+        return resp
+
+    @staticmethod
+    def format_print(_content: list):
+        ret = str()
+        for index, _ in enumerate(_content):
+            tmp = '\x1b[1;34m' + str(index) + ': ' + _[0] + '\x1b[0m'
+            ret += tmp.ljust(30, ' ')
+        return ret
+
+    def update(self, elem):
+        for _ in range(len(self.command_stack)):
+            if self.command_stack[_][0] == elem:
+                self.command_stack[_][1] = 0
+                self.command_stack[_][2] *= 1.1
+                continue
+            self.command_stack[_][1] = self.command_stack[_][1] + 1 if -1 < self.command_stack[_][1] < 8 else 100
+            self.command_stack[_][2] *= 0.9
+
+        if elem not in self.command_history:
+            self.command_history.add(elem)
+            if len(self.command_stack) == self.max_len:
+                self.command_stack.sort(key=lambda i: (i[1], -i[2]))
+                self.command_stack.pop()
+            self.command_stack.append([elem, 0, 1])
+        self.command_stack.sort(key=lambda i: (i[1], -i[2]))
+
+
+class Application:
+    def __init__(self, _ip, _port, _login, _pw):
+        self._root = Tk()
+        self._root.resizable(False, False)
+        self._root.title("Diagnostic Tool")
+        self.root = Frame(master=self._root, width=1200, height=600)
+        self.root.pack()
+        self.__layout()
+        self.ssh_conn = SSHClientConnect(_ip, int(_port), _login, _pw)
+        self.edit_area.focus_set()
+        self.run()
+
+    def __layout(self):
+        self.output_area = Text(self.root, bg="seashell")
+        self.output_area.place(x=0, y=0, width=800, height=580)
+        self.output_area_y_scrollbar = Scrollbar(self.output_area)
+        self.output_area_y_scrollbar.pack(side="right", fill=Y)
+        self.edit_area = Entry(self.root, text="Command Input", bg="ivory")
+        self.edit_area.place(x=0, y=580, width=800, height=20)
+        self.history_area = Text(self.root, bg="azure")
+        self.history_area.place(x=800, y=0, width=400, height=400)
+        self.settings_area = Frame(self.root, bg="white")
+        self.settings_area.place(x=800, y=400, width=400, height=300)
+        self.__setting_area_layout()
+        self.edit_area.bind("<Return>", self.edit_area_event)
+        self.edit_area.bind("-", self.find_previous_command)
+        self.edit_area.bind("<Down>", self.clear_edit_area)
+        self.edit_area.bind("<Up>", self.repeat_edit_area)
+
+    def __setting_area_layout(self):
+        self.btn_1 = Button(self.settings_area, text="Save Record")
+        self.btn_1.place(x=10, y=10, width=100, height=30)
+        self.btn_1.bind("<Button-1>", self.record_save)
+        self.label_1 = Label(self.settings_area, text="<empty>")
+        self.label_1.place(x=120, y=10, width=250, height=30)
+        pass
+
+    def record_save(self, event=None):
+        file = tkinter.filedialog.asksaveasfile(defaultextension='.txt')
+        self.label_1['text'] = file.name
+        file.write(self.output_area.get("1.0", END))
+
+    def edit_area_event(self, event=None):
+        if self.ssh_conn.command_search_state:
+            self.ssh_conn.command_search_state = False
+            try:
+                order = int(self.edit_area.get().replace(" ", "")[1:])
+                if -1 < order < len(self.ssh_conn.command_stack):
+                    self.edit_area.delete(0, END)
+                    self.edit_area.insert("end", self.ssh_conn.command_stack[order][0])
+                    return
+            except ValueError:
+                pass
+            finally:
+                pass
+
+        tmp = self.edit_area.get().split(';')
+        for command in tmp:
+            print(command)
+            if command.strip != '':
+                print(222222222)
+                if command.strip() == 'zz':
+                    print(1111111)
+                    self.ssh_conn.shell_interact_channel.send(chr(3))
+                _ = self.ssh_conn.execute_command(command)
+                self.output_area.insert('end', _)
+                self.output_area.see(END)
+
+        self.edit_area.delete(0, END)
+        self.history_area_update()
+        pass
+
+    def find_previous_command(self, event=None):
+        self.ssh_conn.command_search_state = True
+        pass
+
+    def clear_edit_area(self, event=None):
+        self.edit_area.delete(0, END)
+
+    def repeat_edit_area(self, event=None):
+        self.edit_area.delete(0, END)
+        if len(self.ssh_conn.command_stack):
+            self.edit_area.insert('end', self.ssh_conn.command_stack[0][0])
+
+    def history_area_update(self):
+        self.history_area.delete(1.0, END)
+        self.history_area.insert('end', 'ORDER    COMMAND' + '\n')
+        for index, _ in enumerate(self.ssh_conn.command_stack):
+            self.history_area.insert('end', '{:<10d}{:<40s}\n'.format(index, _[0]))
+
+    def run(self):
+        self.root.mainloop()
+
+    # self.ssh_conn = SSHClientConnect('192.168.197.129', 22, 'xie', '123456')
+
+
+if __name__ == '__main__':
+    # port_protection = '7KZdB04yPO+UiDzmuB9DOoylcM0kRCHtTMq0YqpkcTTliGJ18nSLZ1ZBh99dm0NtUJwtI4s7KzY9ejYkcVFiAfaZiW0S' \
+    #                   'OfVVev+3dio5nxFxli6PpciYtkqyw4VojbyxeIIkTwFG4ZkNgLCIK6vDMVMbLQVl7M6VxStxtHkChl4='
+    # ssh1 = SSHClientConnect('192.168.1.253', 33400, 'root', '71c22a741911452a', port_protection)
+    # # ssh1 = SSHClientConnect('192.168.197.129', 22, 'xie', '123456')
+    # ssh1.interact_control()
+    # output = None
+    # while True:
+    #     output = input()
+    #     if output == 'q' or output == 'exit':
+    #         break
+    #     if output == ' ' and len(command_stack):
+    #         print(format_print(command_stack))
+    #         output = input()
+    #         try:
+    #             if 0 <= int(output) < len(command_stack):
+    #                 print(command_stack[int(output)][0])
+    #                 update([command_stack[int(output)][0], 0, 1])
+    #         finally:
+    #             pass
+    #     else:
+    #         print(output)
+    #         update([output, 0, 1])
+
+    # lead = Lead()
+    # a = Application(*lead.interface())
+    a = Application('192.168.197.129', 22, 'xie', '123456')
+    a.run()
+
